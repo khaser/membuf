@@ -1,0 +1,6 @@
+build/
+task-*.pdf
+examples/
+.envrc
+.direnv
+result

@@ -1,0 +1,140 @@
+{
+  "nodes": {
+    "flake-utils": {
+      "inputs": {
+        "systems": "systems"
+      },
+      "locked": {
+        "lastModified": 1710146030,
+        "narHash": "sha256-SZ5L6eA7HJ/nmkzGG7/ISclqe6oZdOZTNoesiInkXPQ=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "b1d9ab70662946ef0850d488da1c9019f3a9752a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "flake-utils_2": {
+      "inputs": {
+        "systems": "systems_2"
+      },
+      "locked": {
+        "lastModified": 1701680307,
+        "narHash": "sha256-kAuep2h5ajznlPMD9rnQyffWG8EM/C73lejGofXvdM8=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "4022d587cbbfd70fe950c1e2083a02621806a725",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "khaser": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "sway-vim-kbswitch": "sway-vim-kbswitch"
+      },
+      "locked": {
+        "lastModified": 1713218523,
+        "narHash": "sha256-GZ5K5sSC/CrEKSGX9obV3jepwLryfK+rB+kOxvzzEIE=",
+        "ref": "master",
+        "rev": "071d3be33a052710cdb83be2f58e2d12875ee666",
+        "revCount": 42,
+        "type": "git",
+        "url": "ssh://git@109.124.253.149:64396/~git/nixos-config"
+      },
+      "original": {
+        "ref": "master",
+        "type": "git",
+        "url": "ssh://git@109.124.253.149:64396/~git/nixos-config"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1712437997,
+        "narHash": "sha256-g0whLLwRvgO2FsyhY8fNk+TWenS3jg5UdlWL4uqgFeo=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "e38d7cb66ea4f7a0eb6681920615dfcc30fc2920",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-23.11",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "flake-utils": "flake-utils",
+        "khaser": "khaser",
+        "nixpkgs": [
+          "khaser",
+          "nixpkgs"
+        ]
+      }
+    },
+    "sway-vim-kbswitch": {
+      "inputs": {
+        "flake-utils": "flake-utils_2",
+        "nixpkgs": [
+          "khaser",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1704458289,
+        "narHash": "sha256-fP3WlMthtPNCMKZFp87MRcX/b+rna7i0gDhAxNQzeDc=",
+        "owner": "khaser",
+        "repo": "sway-vim-kbswitch",
+        "rev": "56b0914acdd92ec013f04725114d53614803793b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "khaser",
+        "repo": "sway-vim-kbswitch",
+        "type": "github"
+      }
+    },
+    "systems": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "systems_2": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
