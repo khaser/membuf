@@ -20,29 +20,42 @@ static struct cdev membuf_dev;
 static struct class *cls;
 char* buff;
 
+DECLARE_RWSEM(rw_lock);
+
 static unsigned int size = 256;
 module_param(size, int, 0444);
 MODULE_PARM_DESC(size, "Size of the memory buffer");
 static struct kobject *buff_obj;
 
 static ssize_t size_show(struct kobject *kobj, struct kobj_attribute *attr, char* buf) {
-    return sprintf(buf, "%d\n", size);
+    int res;
+    down_read(&rw_lock);
+    res = sprintf(buf, "%d\n", size);
+    up_read(&rw_lock);
+    return res;
 }
 
 static ssize_t size_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf,
                           size_t count) {
-    unsigned int old_size = size;
+    unsigned int old_size;
     int res;
+    down_write(&rw_lock);
+    old_size = size;
     if ((res = kstrtouint(buf, 10, &size)) < 0) {
         pr_err("membuf: failed to update size\n");
-        return res;
+        goto exit;
     }
     if (size == 0) {
         pr_err("membuf: size should be >= 0\n");
-        return -ERANGE;
+        res = -ERANGE;
+        goto exit;
     }
-    buff = kvrealloc(buff, old_size, size + 1, GFP_KERNEL | __GFP_ZERO);
-    return count;
+    buff = kvrealloc(buff, old_size, size, GFP_KERNEL | __GFP_ZERO);
+    res = count;
+    exit:
+    up_write(&rw_lock);
+    pr_info("membuf: size updated through sys attribute\n");
+    return res;
 }
 
 static struct kobj_attribute size_attribute = __ATTR(size, 0660, size_show, size_store);
@@ -50,36 +63,49 @@ static struct kobj_attribute size_attribute = __ATTR(size, 0660, size_show, size
 
 static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, loff_t *off) {
     int to_copy = (len + *off > size ? size - *off : len);
+    int res;
+    down_read(&rw_lock);
     if (*off >= size) {
         *off = 0;
-        return 0;
+        res = 0;
+        goto exit;
     }
     pr_info("membuf: process %d try to read %lu bytes with %lld offset\n", current->pid, len, *off);
     if (copy_to_user(ubuf, buff + *off, to_copy)) {
         pr_info("membuf: copy to user failed, return EFAULT\n");
-        return -EFAULT;
+        res = -EFAULT;
+        goto exit;
     }
     pr_info("Data successfully written into user buffer\n");
     *off += to_copy;
-    return to_copy;
+    res = to_copy;
+    exit:
+    up_read(&rw_lock);
+    return res;
 }
 
 
 static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t len, loff_t *off) {
     int to_copy = (len + *off > size ? size - *off : len);
+    int res;
+    down_write(&rw_lock);
     if (*off >= size) {
         *off = 0;
-        return 0;
+        res = 0;
+        goto exit;
     }
     pr_info("membuf: process %d try to write %lu bytes with %lld offset\n", current->pid, len, *off);
     if (copy_from_user(buff + *off, ubuf, to_copy)) {
         pr_info("membuf: copy from user failed, return EFAULT\n");
-        return -EFAULT;
+        res = -EFAULT;
+        goto exit;
     }
     pr_info("Data successfully written into knapsack\n");
-    buff[*off + len] = '\0';
     *off += to_copy;
-    return to_copy;
+    res = to_copy;
+    exit:
+    up_write(&rw_lock);
+    return res;
 }
 
 static struct file_operations membuf_ops = {
@@ -127,7 +153,7 @@ static int __init membuf_init(void)
         goto fail5;
     }
 
-    buff = kvzalloc(size + 1, GFP_KERNEL);
+    buff = kvzalloc(size, GFP_KERNEL);
     if (buff == 0) {
         pr_err("membuf: error on buffer allocation\n");
         res = -1;
