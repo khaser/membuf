@@ -2,6 +2,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 
+#include <linux/version.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/uaccess.h>
@@ -131,7 +132,11 @@ static int __init membuf_init(void)
         goto fail1;
     }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     if (IS_ERR(cls = class_create(THIS_MODULE, DEVICE_NAME))) {
+#else
+    if (IS_ERR(cls = class_create(DEVICE_NAME))) {
+#endif
         pr_err("membuf: error on class_create\n");
         res = -1;
         goto fail2;

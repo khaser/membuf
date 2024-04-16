@@ -11,16 +11,23 @@
     flake-utils.lib.eachDefaultSystem ( system:
     let
       pkgs = import nixpkgs { inherit system; };
-      # kernel = pkgs.linuxKernel.kernels.linux_6_1;
-      kernel = khaser.nixosConfigurations.khaser-nixos.config.boot.kernelPackages.kernel;
+      khaser_kernel = khaser.nixosConfigurations.khaser-nixos.config.boot.kernelPackages.kernel;
+      # Module supports following LTS kernel versions:
+      supported_kernels = {
+        "linux_6.1" = pkgs.linuxKernel.kernels.linux_6_1;
+        "linux_6.6" = pkgs.linuxKernel.kernels.linux_6_6;
+      };
       configured-vim = khaser.lib.vim.override {
         extraRC = ''
-          let &path.="${kernel.dev}/lib/modules/${kernel.modDirVersion}/build/source/include"
+          let &path.="${khaser_kernel.dev}/lib/modules/${khaser_kernel.modDirVersion}/build/source/include"
           set colorcolumn=81
         '';
       };
+      pkgForKernel = (kernel: pkgs.callPackage ./default.nix { inherit kernel; });
     in {
-      packages.default = pkgs.callPackage ./default.nix { inherit kernel; };
+      packages = {
+        default = (pkgForKernel khaser_kernel);
+      } // (builtins.mapAttrs (name: kernel: pkgForKernel kernel) supported_kernels);
 
       devShell = pkgs.mkShell {
         name = "linux-membuf";
