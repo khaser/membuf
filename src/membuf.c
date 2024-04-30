@@ -12,7 +12,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("andrei.khorokhorin@cloudbear.ru");
 MODULE_DESCRIPTION("in-memory knapsack for educational purposes");
-MODULE_VERSION("0.1.0");
+MODULE_VERSION("0.2.0");
 
 #define DEVICE_NAME "membuf"
 
