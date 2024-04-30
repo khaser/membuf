@@ -17,7 +17,7 @@ MODULE_VERSION("0.1.0");
 #define DEVICE_NAME "membuf"
 
 #define MAX_DEV_CNT 255
-static uint8_t dev_cnt = 2;
+static uint8_t dev_cnt = 1;
 
 static char* buffs[MAX_DEV_CNT];
 static struct device* devices[MAX_DEV_CNT];;
@@ -42,43 +42,7 @@ DECLARE_RWSEM(rw_lock);
 #define CONST const
 #endif
 
-static ssize_t dev_cnt_show(CONST struct class *kclass, CONST struct class_attribute *attr, char *buf) {
-    int res;
-    down_read(&rw_lock);
-    res = sprintf(buf, "%d\n", (unsigned int)dev_cnt);
-    up_read(&rw_lock);
-    return res;
-}
-
-static ssize_t dev_cnt_store(CONST struct class *kclass, CONST struct class_attribute *attr, const char *buf, size_t count) {
-    unsigned int new_val;
-    int res;
-    down_write(&rw_lock);
-    if ((res = kstrtouint(buf, 10, &new_val)) < 0) {
-        pr_err("membuf: failed to update dev_cnt\n");
-        goto exit;
-    }
-    if (new_val < 0) {
-        pr_err("membuf: dev_cnt should be >= 0\n");
-        res = -ERANGE;
-        goto exit;
-    }
-    if (new_val > MAX_DEV_CNT) {
-        pr_err("membuf: dev_cnt should be <= MAX_DEV_CNT\n");
-        res = -ERANGE;
-        goto exit;
-    }
-    // TODO: logic
-    dev_cnt = new_val;
-    pr_info("membuf: dev_cnt updated through sys attribute\n");
-    exit:
-    up_write(&rw_lock);
-    return res;
-}
-
-CLASS_ATTR_RW(dev_cnt);
-
-static ssize_t size_show(CONST struct device *kdev, CONST struct device_attribute *attr, char *buf) {
+static ssize_t size_show(struct device *kdev, struct device_attribute *attr, char *buf) {
     int res;
     int minor = MINOR(kdev->devt);
     down_read(&rw_lock);
@@ -87,7 +51,7 @@ static ssize_t size_show(CONST struct device *kdev, CONST struct device_attribut
     return res;
 }
 
-static ssize_t size_store(CONST struct device *kdev, CONST struct device_attribute *attr, const char *buf,
+static ssize_t size_store(struct device *kdev, struct device_attribute *attr, const char *buf,
                           size_t count) {
     int minor = MINOR(kdev->devt);
     unsigned int new_val;
@@ -118,6 +82,103 @@ static ssize_t size_store(CONST struct device *kdev, CONST struct device_attribu
 }
 
 DEVICE_ATTR_RW(size);
+
+// Should be called when lock taken
+static ssize_t membuf_device_create(dev_t dev) {
+    int res;
+    int minor = MINOR(dev);
+    if (IS_ERR(devices[minor] = device_create(cls, NULL, dev, 0, DEVICE_NAME "%d", minor))) {
+        pr_err("membuf: error on device_create\n");
+        res = -1;
+        goto fail1;
+    }
+
+    if ((res = device_create_file(devices[minor], &dev_attr_size))) {
+        pr_err("membuf: error on create `size` sysfs attribute");
+        goto fail2;
+    }
+
+    buffs[minor] = kvzalloc(default_size, GFP_KERNEL);
+    sizes[minor] = default_size;
+    if (buffs[minor] == 0) {
+        pr_err("membuf: error on buffer allocation\n");
+        res = -ENOSPC;
+        goto fail3;
+    }
+
+    pr_info("membuf: device alloc success\n");
+    return res;
+
+    fail3:
+    sizes[minor] = 0;
+    device_remove_file(devices[minor], &dev_attr_size);
+    fail2:
+    device_destroy(cls, dev_region);
+    fail1:
+    devices[minor] = 0;
+    return res;
+}
+
+static void membuf_device_remove(dev_t dev) {
+    int minor = MINOR(dev);
+    // Do nothing if device not allocated
+    if (devices[minor] != 0) {
+        kvfree(buffs[minor]);
+        device_remove_file(devices[minor], &dev_attr_size);
+        device_destroy(cls, dev);
+        sizes[minor] = 0;
+        buffs[minor] = 0;
+        devices[minor] = 0;
+    }
+}
+
+static ssize_t dev_cnt_show(CONST struct class *kclass, CONST struct class_attribute *attr, char *buf) {
+    int res;
+    down_read(&rw_lock);
+    res = sprintf(buf, "%d\n", (unsigned int)dev_cnt);
+    up_read(&rw_lock);
+    return res;
+}
+
+static ssize_t dev_cnt_store(CONST struct class *kclass, CONST struct class_attribute *attr, const char *buf, size_t count) {
+    unsigned int new_val;
+    int res;
+    down_write(&rw_lock);
+    if ((res = kstrtouint(buf, 10, &new_val)) < 0) {
+        pr_err("membuf: failed to update dev_cnt\n");
+        goto exit;
+    }
+    if (new_val < 0) {
+        pr_err("membuf: dev_cnt should be >= 0\n");
+        res = -ERANGE;
+        goto exit;
+    }
+    if (new_val > MAX_DEV_CNT) {
+        pr_err("membuf: dev_cnt should be <= MAX_DEV_CNT\n");
+        res = -ERANGE;
+        goto exit;
+    }
+
+    while (dev_cnt != new_val) {
+        if (new_val > dev_cnt) {
+            // allocate new devices
+            if ((res = membuf_device_create(dev_region + dev_cnt++))) {
+                res = -1;
+                goto exit;
+            }
+        } else {
+            membuf_device_remove(dev_region + --dev_cnt);
+        }
+    }
+
+    res = count;
+    pr_info("membuf: dev_cnt updated through sys attribute\n");
+    exit:
+    up_write(&rw_lock);
+    return res;
+}
+
+CLASS_ATTR_RW(dev_cnt);
 
 static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, loff_t *off) {
     int minor = MINOR(filp->f_inode->i_rdev);
@@ -175,55 +236,6 @@ static struct file_operations membuf_ops = {
     .write      = membuf_write,
 };
 
-// Should be called when lock taken
-static ssize_t membuf_device_create(dev_t dev) {
-    int res;
-    int minor = MINOR(dev);
-    if (IS_ERR(devices[minor] = device_create(cls, NULL, dev, 0, DEVICE_NAME "%d", minor))) {
-        pr_err("membuf: error on device_create\n");
-        res = -1;
-        goto fail1;
-    }
-
-    if ((res = device_create_file(devices[minor], &dev_attr_size))) {
-        pr_err("membuf: error on create `size` sysfs attribute");
-        goto fail2;
-    }
-
-    buffs[minor] = kvzalloc(default_size, GFP_KERNEL);
-    sizes[minor] = default_size;
-    if (buffs[minor] == 0) {
-        pr_err("membuf: error on buffer allocation\n");
-        res = -ENOSPC;
-        goto fail3;
-    }
-
-    pr_info("membuf: device alloc success\n");
-    return res;
-
-    fail3:
-    sizes[minor] = 0;
-    device_remove_file(devices[minor], &dev_attr_size);
-    fail2:
-    device_destroy(cls, dev_region);
-    fail1:
-    devices[minor] = 0;
-    return res;
-}
-
-static void membuf_device_remove(dev_t dev) {
-    int minor = MINOR(dev);
-    // Do nothing if device not allocated
-    if (devices[minor] != 0) {
-        kvfree(buffs[minor]);
-        device_remove_file(devices[minor], &dev_attr_size);
-        device_destroy(cls, dev);
-        sizes[minor] = 0;
-        buffs[minor] = 0;
-        devices[minor] = 0;
-    }
-}
-
 static int __init membuf_init(void)
 {
     int res;
@@ -259,7 +271,6 @@ static int __init membuf_init(void)
 
     for (dev = dev_region; dev < dev_region + dev_cnt; ++dev) {
         if ((res = membuf_device_create(dev))) {
-            res = -1;
             goto fail4;
         }
     }
