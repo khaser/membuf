@@ -52,6 +52,11 @@ static ssize_t size_store(struct kobject *kobj, struct kobj_attribute *attr, con
         goto exit;
     }
     buff = kvrealloc(buff, old_size, size, GFP_KERNEL | __GFP_ZERO);
+    if (buff == 0) {
+        pr_err("membuf: error on buffer realloc");
+        res = -ENOMEM;
+        goto exit;
+    }
     res = count;
     exit:
     up_write(&rw_lock);
