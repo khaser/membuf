@@ -16,7 +16,9 @@ MODULE_VERSION("0.1.0");
 
 #define DEVICE_NAME "membuf"
 
+// Contain info about allocated major and minor numbers
 dev_t dev = 0;
+// Contain device op functions
 static struct cdev membuf_dev;
 static struct class *cls;
 char* buff;
@@ -26,9 +28,13 @@ DECLARE_RWSEM(rw_lock);
 static unsigned int size = 256;
 module_param(size, int, 0444);
 MODULE_PARM_DESC(size, "Size of the memory buffer");
-static struct kobject *buff_obj;
 
-static ssize_t size_show(struct kobject *kobj, struct kobj_attribute *attr, char* buf) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
+#define CONST
+#else
+#define CONST const
+#endif
+static ssize_t size_show(CONST struct class *kclass, CONST struct class_attribute *attr, char* buf) {
     int res;
     down_read(&rw_lock);
     res = sprintf(buf, "%d\n", size);
@@ -36,7 +42,7 @@ static ssize_t size_show(struct kobject *kobj, struct kobj_attribute *attr, char
     return res;
 }
 
-static ssize_t size_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf,
+static ssize_t size_store(CONST struct class *kclass, CONST struct class_attribute *attr, const char *buf,
                           size_t count) {
     unsigned int old_size;
     int res;
@@ -64,8 +70,7 @@ static ssize_t size_store(struct kobject *kobj, struct kobj_attribute *attr, con
     return res;
 }
 
-static struct kobj_attribute size_attribute = __ATTR(size, 0660, size_show, size_store);
-
+CLASS_ATTR_RW(size);
 
 static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, loff_t *off) {
     int to_copy = (len + *off > size ? size - *off : len);
@@ -153,14 +158,10 @@ static int __init membuf_init(void)
         goto fail3;
     }
 
-    if (!(buff_obj = kobject_create_and_add("membuf", buff_obj))) {
-        pr_err("membuf: error on membuf kobject create");
-        goto fail4;
-    }
-
-    if ((res = sysfs_create_file(buff_obj, &size_attribute.attr))) {
+    /* // TODO: 6.6 version doesn't work */
+    if ((res = class_create_file(cls, &class_attr_size))) {
         pr_err("membuf: error on sysfs attribute file create");
-        goto fail5;
+        goto fail4;
     }
 
     buff = kvzalloc(size, GFP_KERNEL);
@@ -175,7 +176,7 @@ static int __init membuf_init(void)
     return 0;
 
     fail5:
-    kobject_put(buff_obj);
+    class_remove_file(cls, &class_attr_size);
     fail4:
     device_destroy(cls, dev);
     fail3:
@@ -189,7 +190,7 @@ static int __init membuf_init(void)
 
 static void __exit membuf_cleanup(void) {
     kvfree(buff);
-    kobject_put(buff_obj);
+    class_remove_file(cls, &class_attr_size);
     device_destroy(cls, dev);
     class_destroy(cls);
     cdev_del(&membuf_dev);
