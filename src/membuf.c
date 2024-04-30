@@ -25,58 +25,82 @@ char* buff;
 
 DECLARE_RWSEM(rw_lock);
 
-static unsigned int size = 256;
-module_param(size, int, 0444);
-MODULE_PARM_DESC(size, "Size of the memory buffer");
+static unsigned int dev_cnt = 1;
+
+static unsigned int default_size = 256;
+module_param(default_size, int, 0444);
+MODULE_PARM_DESC(default_size, "Size of a new memory buffer");
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
 #define CONST
 #else
 #define CONST const
 #endif
-static ssize_t size_show(CONST struct class *kclass, CONST struct class_attribute *attr, char* buf) {
+static ssize_t dev_cnt_show(CONST struct class *kclass, CONST struct class_attribute *attr, char* buf) {
     int res;
     down_read(&rw_lock);
-    res = sprintf(buf, "%d\n", size);
+    res = sprintf(buf, "%d\n", dev_cnt);
     up_read(&rw_lock);
     return res;
 }
 
-static ssize_t size_store(CONST struct class *kclass, CONST struct class_attribute *attr, const char *buf,
-                          size_t count) {
-    unsigned int old_size;
+static ssize_t dev_cnt_store(CONST struct class *kclass, CONST struct class_attribute *attr, const char *buf, size_t count) {
+    unsigned int new_val;
     int res;
     down_write(&rw_lock);
-    old_size = size;
-    if ((res = kstrtouint(buf, 10, &size)) < 0) {
-        pr_err("membuf: failed to update size\n");
+    if ((res = kstrtouint(buf, 10, &new_val)) < 0) {
+        pr_err("membuf: failed to update dev_cnt\n");
         goto exit;
     }
-    if (size == 0) {
-        pr_err("membuf: size should be >= 0\n");
+    if (new_val < 0) {
+        pr_err("membuf: dev_cnt should be >= 0\n");
         res = -ERANGE;
         goto exit;
     }
-    buff = kvrealloc(buff, old_size, size, GFP_KERNEL | __GFP_ZERO);
-    if (buff == 0) {
-        pr_err("membuf: error on buffer realloc");
-        res = -ENOMEM;
-        goto exit;
-    }
-    res = count;
+    // TODO: logic
+    res = 0;
+    dev_cnt = new_val;
+    pr_info("membuf: dev_cnt updated through sys attribute\n");
     exit:
     up_write(&rw_lock);
-    pr_info("membuf: size updated through sys attribute\n");
     return res;
 }
 
-CLASS_ATTR_RW(size);
+/* static ssize_t size_store(CONST struct class *kclass, CONST struct class_attribute *attr, const char *buf, */
+/*                           size_t count) { */
+/*     unsigned int old_size; */
+/*     int res; */
+/*     down_write(&rw_lock); */
+/*     old_size = size; */
+/*     if ((res = kstrtouint(buf, 10, &size)) < 0) { */
+/*         pr_err("membuf: failed to update size\n"); */
+/*         goto exit; */
+/*     } */
+/*     if (size == 0) { */
+/*         pr_err("membuf: size should be >= 0\n"); */
+/*         res = -ERANGE; */
+/*         goto exit; */
+/*     } */
+/*     buff = kvrealloc(buff, old_size, size, GFP_KERNEL | __GFP_ZERO); */
+/*     if (buff == 0) { */
+/*         pr_err("membuf: error on buffer realloc"); */
+/*         res = -ENOMEM; */
+/*         goto exit; */
+/*     } */
+/*     res = count; */
+/*     exit: */
+/*     up_write(&rw_lock); */
+/*     pr_info("membuf: size updated through sys attribute\n"); */
+/*     return res; */
+/* } */
+
+CLASS_ATTR_RW(dev_cnt);
 
 static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, loff_t *off) {
-    int to_copy = (len + *off > size ? size - *off : len);
+    int to_copy = (len + *off > default_size ? default_size - *off : len);
     int res;
     down_read(&rw_lock);
-    if (*off >= size) {
+    if (*off >= default_size) {
         *off = 0;
         res = 0;
         goto exit;
@@ -95,13 +119,12 @@ static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, lof
     return res;
 }
 
-
 static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t len, loff_t *off) {
-    int to_copy = (len + *off > size ? size - *off : len);
+    int to_copy = (len + *off > default_size ? default_size - *off : len);
     int res;
     down_write(&rw_lock);
     pr_info("membuf: process %d try to write %lu bytes with %lld offset\n", current->pid, len, *off);
-    if (*off >= size) {
+    if (*off >= default_size) {
         pr_info("membuf: offset out of device buffer range, return ENOSPC\n");
         res = -ENOSPC;
         goto exit;
@@ -159,12 +182,12 @@ static int __init membuf_init(void)
     }
 
     /* // TODO: 6.6 version doesn't work */
-    if ((res = class_create_file(cls, &class_attr_size))) {
+    if ((res = class_create_file(cls, &class_attr_dev_cnt))) {
         pr_err("membuf: error on sysfs attribute file create");
         goto fail4;
     }
 
-    buff = kvzalloc(size, GFP_KERNEL);
+    buff = kvzalloc(default_size, GFP_KERNEL);
     if (buff == 0) {
         pr_err("membuf: error on buffer allocation\n");
         res = -1;
@@ -176,7 +199,7 @@ static int __init membuf_init(void)
     return 0;
 
     fail5:
-    class_remove_file(cls, &class_attr_size);
+    class_remove_file(cls, &class_attr_dev_cnt);
     fail4:
     device_destroy(cls, dev);
     fail3:
@@ -190,7 +213,7 @@ static int __init membuf_init(void)
 
 static void __exit membuf_cleanup(void) {
     kvfree(buff);
-    class_remove_file(cls, &class_attr_size);
+    class_remove_file(cls, &class_attr_dev_cnt);
     device_destroy(cls, dev);
     class_destroy(cls);
     cdev_del(&membuf_dev);
