@@ -95,12 +95,12 @@ static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t l
     int to_copy = (len + *off > size ? size - *off : len);
     int res;
     down_write(&rw_lock);
+    pr_info("membuf: process %d try to write %lu bytes with %lld offset\n", current->pid, len, *off);
     if (*off >= size) {
-        *off = 0;
-        res = 0;
+        pr_info("membuf: offset out of device buffer range, return ENOSPC\n");
+        res = -ENOSPC;
         goto exit;
     }
-    pr_info("membuf: process %d try to write %lu bytes with %lld offset\n", current->pid, len, *off);
     if (copy_from_user(buff + *off, ubuf, to_copy)) {
         pr_info("membuf: copy from user failed, return EFAULT\n");
         res = -EFAULT;
