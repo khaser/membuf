@@ -89,7 +89,7 @@ static ssize_t membuf_device_create(dev_t dev) {
     int minor = MINOR(dev);
     if (IS_ERR(devices[minor] = device_create(cls, NULL, dev, 0, DEVICE_NAME "%d", minor))) {
         pr_err("membuf: error on device_create\n");
-        res = -1;
+        res = PTR_ERR(devices[minor]);
         goto fail1;
     }
 
@@ -111,6 +111,7 @@ static ssize_t membuf_device_create(dev_t dev) {
 
     fail3:
     sizes[minor] = 0;
+    buffs[minor] = 0;
     device_remove_file(devices[minor], &dev_attr_size);
     fail2:
     device_destroy(cls, dev_region);
@@ -124,10 +125,10 @@ static void membuf_device_remove(dev_t dev) {
     // Do nothing if device not allocated
     if (devices[minor] != 0) {
         kvfree(buffs[minor]);
-        device_remove_file(devices[minor], &dev_attr_size);
-        device_destroy(cls, dev);
         sizes[minor] = 0;
         buffs[minor] = 0;
+        device_remove_file(devices[minor], &dev_attr_size);
+        device_destroy(cls, dev);
         devices[minor] = 0;
     }
 }
@@ -161,9 +162,7 @@ static ssize_t dev_cnt_store(CONST struct class *kclass, CONST struct class_attr
 
     while (dev_cnt != new_val) {
         if (new_val > dev_cnt) {
-            // allocate new devices
             if ((res = membuf_device_create(dev_region + dev_cnt++))) {
-                res = -1;
                 goto exit;
             }
         } else {
@@ -188,7 +187,6 @@ static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, lof
     down_read(&rw_lock);
     if (*off >= size) {
         *off = 0;
-        res = 0;
         goto exit;
     }
     pr_info("membuf: process %d try to read %lu bytes with %lld offset\n", current->pid, len, *off);
@@ -260,7 +258,7 @@ static int __init membuf_init(void)
     if (IS_ERR(cls = class_create(DEVICE_NAME))) {
 #endif
         pr_err("membuf: error on class_create\n");
-        res = -1;
+        res = PTR_ERR(cls);
         goto fail2;
     }
 
