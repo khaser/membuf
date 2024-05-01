@@ -12,3 +12,9 @@ clean:
 
 install:
 	make -C $(KERNEL_DIR) M=$(PWD) modules_install
+
+insmod:
+	sudo insmod membuf.ko
+
+rmmod:
+	sudo rmmod membuf.ko
