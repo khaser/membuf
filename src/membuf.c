@@ -19,9 +19,13 @@ MODULE_VERSION("0.2.0");
 #define MAX_DEV_CNT 255
 static uint8_t dev_cnt = 1;
 
-static char* buffs[MAX_DEV_CNT];
-static struct device* devices[MAX_DEV_CNT];;
-static unsigned int sizes[MAX_DEV_CNT];;
+struct membuf_device {
+    char* buff;
+    struct device* kdevice;
+    unsigned int size;
+    // TODO: size_t epoch;
+};
+struct membuf_device devs[MAX_DEV_CNT];
 
 static unsigned int default_size = 256;
 module_param(default_size, int, 0444);
@@ -46,7 +50,7 @@ static ssize_t size_show(struct device *kdev, struct device_attribute *attr, cha
     int res;
     int minor = MINOR(kdev->devt);
     down_read(&rw_lock);
-    res = sprintf(buf, "%d\n", sizes[minor]);
+    res = sprintf(buf, "%d\n", devs[minor].size);
     up_read(&rw_lock);
     return res;
 }
@@ -56,6 +60,7 @@ static ssize_t size_store(struct device *kdev, struct device_attribute *attr, co
     int minor = MINOR(kdev->devt);
     unsigned int new_val;
     int res;
+    struct membuf_device *dev = devs + minor;
     down_write(&rw_lock);
     if ((res = kstrtouint(buf, 10, &new_val)) < 0) {
         pr_err("membuf: failed to update size\n");
@@ -67,12 +72,12 @@ static ssize_t size_store(struct device *kdev, struct device_attribute *attr, co
         goto exit;
     }
 
-    if ((buffs[minor] = kvrealloc(buffs[minor], sizes[minor], new_val, GFP_KERNEL | __GFP_ZERO)) == 0) {
+    if ((dev->buff = kvrealloc(dev->buff, dev->size, new_val, GFP_KERNEL | __GFP_ZERO)) == 0) {
         pr_err("membuf: error on buffer realloc");
         res = -ENOMEM;
         goto exit;
     }
-    sizes[minor] = new_val;
+    dev->size = new_val;
     res = count;
 
     pr_info("membuf: size updated through sys attribute\n");
@@ -84,23 +89,25 @@ static ssize_t size_store(struct device *kdev, struct device_attribute *attr, co
 DEVICE_ATTR_RW(size);
 
 // Should be called when lock taken
-static ssize_t membuf_device_create(dev_t dev) {
+static ssize_t membuf_device_create(dev_t dev_id) {
     int res;
-    int minor = MINOR(dev);
-    if (IS_ERR(devices[minor] = device_create(cls, NULL, dev, 0, DEVICE_NAME "%d", minor))) {
+    int minor = MINOR(dev_id);
+    struct membuf_device *dev = devs + minor;
+
+    if (IS_ERR(dev->kdevice = device_create(cls, NULL, dev_id, 0, DEVICE_NAME "%d", minor))) {
         pr_err("membuf: error on device_create\n");
-        res = PTR_ERR(devices[minor]);
+        res = PTR_ERR(dev->kdevice);
         goto fail1;
     }
 
-    if ((res = device_create_file(devices[minor], &dev_attr_size))) {
+    if ((res = device_create_file(dev->kdevice, &dev_attr_size))) {
         pr_err("membuf: error on create `size` sysfs attribute");
         goto fail2;
     }
 
-    buffs[minor] = kvzalloc(default_size, GFP_KERNEL);
-    sizes[minor] = default_size;
-    if (buffs[minor] == 0) {
+    dev->buff = kvzalloc(default_size, GFP_KERNEL);
+    dev->size = default_size;
+    if (dev->buff == 0) {
         pr_err("membuf: error on buffer allocation\n");
         res = -ENOSPC;
         goto fail3;
@@ -110,26 +117,25 @@ static ssize_t membuf_device_create(dev_t dev) {
     return res;
 
     fail3:
-    sizes[minor] = 0;
-    buffs[minor] = 0;
-    device_remove_file(devices[minor], &dev_attr_size);
+    dev->size = 0;
+    dev->buff = 0;
+    device_remove_file(dev->kdevice, &dev_attr_size);
     fail2:
-    device_destroy(cls, dev_region);
+    device_destroy(cls, dev_id);
     fail1:
-    devices[minor] = 0;
+    dev->kdevice = 0;
     return res;
 }
 
-static void membuf_device_remove(dev_t dev) {
-    int minor = MINOR(dev);
+static void membuf_device_remove(dev_t dev_id) {
+    int minor = MINOR(dev_id);
+    struct membuf_device *dev = devs + minor;
     // Do nothing if device not allocated
-    if (devices[minor] != 0) {
-        kvfree(buffs[minor]);
-        sizes[minor] = 0;
-        buffs[minor] = 0;
-        device_remove_file(devices[minor], &dev_attr_size);
-        device_destroy(cls, dev);
-        devices[minor] = 0;
+    if (dev->kdevice != 0) {
+        kvfree(dev->buff);
+        device_remove_file(dev->kdevice, &dev_attr_size);
+        device_destroy(cls, dev_id);
+        *dev = (struct membuf_device) {0, 0, 0};
     }
 }
 
@@ -181,16 +187,16 @@ CLASS_ATTR_RW(dev_cnt);
 
 static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, loff_t *off) {
     int minor = MINOR(filp->f_inode->i_rdev);
-    unsigned int size = sizes[minor];
-    int to_copy = (len + *off > size ? size - *off : len);
+    struct membuf_device *dev = devs + minor;
+    int to_copy = (len + *off > dev->size ? dev->size - *off : len);
     int res;
     down_read(&rw_lock);
-    if (*off >= size) {
+    if (*off >= dev->size) {
         *off = 0;
         goto exit;
     }
     pr_info("membuf: process %d try to read %lu bytes with %lld offset\n", current->pid, len, *off);
-    if (copy_to_user(ubuf, buffs[minor] + *off, to_copy)) {
+    if (copy_to_user(ubuf, dev->buff + *off, to_copy)) {
         pr_info("membuf: copy to user failed, return EFAULT\n");
         res = -EFAULT;
         goto exit;
@@ -205,17 +211,17 @@ static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, lof
 
 static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t len, loff_t *off) {
     int minor = MINOR(filp->f_inode->i_rdev);
-    unsigned int size = sizes[minor];
-    int to_copy = (len + *off > size ? size - *off : len);
+    struct membuf_device *dev = devs + minor;
+    int to_copy = (len + *off > dev->size ? dev->size - *off : len);
     int res;
     down_write(&rw_lock);
     pr_info("membuf: process %d try to write %lu bytes with %lld offset\n", current->pid, len, *off);
-    if (*off >= size) {
+    if (*off >= dev->size) {
         pr_info("membuf: offset out of device buffer range, return ENOSPC\n");
         res = -ENOSPC;
         goto exit;
     }
-    if (copy_from_user(buffs[minor] + *off, ubuf, to_copy)) {
+    if (copy_from_user(dev->buff + *off, ubuf, to_copy)) {
         pr_info("membuf: copy from user failed, return EFAULT\n");
         res = -EFAULT;
         goto exit;
@@ -237,7 +243,7 @@ static struct file_operations membuf_ops = {
 static int __init membuf_init(void)
 {
     int res;
-    dev_t dev;
+    dev_t dev_id;
     pr_info("membuf: module load\n");
 
     if ((res = alloc_chrdev_region(&dev_region, 0, MAX_DEV_CNT, DEVICE_NAME)) < 0) {
@@ -267,8 +273,8 @@ static int __init membuf_init(void)
         goto fail3;
     }
 
-    for (dev = dev_region; dev < dev_region + dev_cnt; ++dev) {
-        if ((res = membuf_device_create(dev))) {
+    for (dev_id = dev_region; dev_id < dev_region + dev_cnt; ++dev_id) {
+        if ((res = membuf_device_create(dev_id))) {
             goto fail4;
         }
     }
@@ -278,8 +284,8 @@ static int __init membuf_init(void)
     return 0;
 
     fail4:
-    while (--dev != dev_region) {
-        membuf_device_remove(dev);
+    while (--dev_id != dev_region) {
+        membuf_device_remove(dev_id);
     }
     class_remove_file(cls, &class_attr_dev_cnt);
     fail3:
@@ -292,8 +298,8 @@ static int __init membuf_init(void)
 }
 
 static void __exit membuf_cleanup(void) {
-    for (dev_t dev = dev_region; dev < dev_region + MAX_DEV_CNT; ++dev) {
-        membuf_device_remove(dev);
+    for (dev_t dev_id = dev_region; dev_id < dev_region + MAX_DEV_CNT; ++dev_id) {
+        membuf_device_remove(dev_id);
     }
 
     class_remove_file(cls, &class_attr_dev_cnt);
