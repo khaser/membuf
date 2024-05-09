@@ -19,18 +19,21 @@ MODULE_VERSION("0.2.0");
 #define MAX_DEV_CNT 255
 static uint8_t dev_cnt = 1;
 
+struct file_private_data {
+    size_t epoch;
+};
+
 struct membuf_device {
     char* buff;
     struct device* kdevice;
     unsigned int size;
-    // TODO: size_t epoch;
+    size_t epoch; // counts device create+remove operations
 };
 struct membuf_device devs[MAX_DEV_CNT];
 
 static unsigned int default_size = 256;
 module_param(default_size, int, 0444);
 MODULE_PARM_DESC(default_size, "Size of a new memory buffer");
-
 
 // Contain info about allocated major and minor numbers
 dev_t dev_region = 0;
@@ -109,21 +112,22 @@ static ssize_t membuf_device_create(dev_t dev_id) {
     dev->size = default_size;
     if (dev->buff == 0) {
         pr_err("membuf: error on buffer allocation\n");
-        res = -ENOSPC;
+        res = -ENOMEM;
         goto fail3;
     }
 
+    dev->epoch++;
     pr_info("membuf: device alloc success\n");
     return res;
 
     fail3:
-    dev->size = 0;
-    dev->buff = 0;
     device_remove_file(dev->kdevice, &dev_attr_size);
     fail2:
     device_destroy(cls, dev_id);
     fail1:
     dev->kdevice = 0;
+    dev->size = 0;
+    dev->buff = 0;
     return res;
 }
 
@@ -135,7 +139,10 @@ static void membuf_device_remove(dev_t dev_id) {
         kvfree(dev->buff);
         device_remove_file(dev->kdevice, &dev_attr_size);
         device_destroy(cls, dev_id);
-        *dev = (struct membuf_device) {0, 0, 0};
+        dev->kdevice = 0;
+        dev->size = 0;
+        dev->buff = 0;
+        dev->epoch++;
     }
 }
 
@@ -186,22 +193,28 @@ static ssize_t dev_cnt_store(CONST struct class *kclass, CONST struct class_attr
 CLASS_ATTR_RW(dev_cnt);
 
 static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, loff_t *off) {
-    int minor = MINOR(filp->f_inode->i_rdev);
+    int minor = iminor(filp->f_inode);
     struct membuf_device *dev = devs + minor;
+    struct file_private_data *filp_data = filp->private_data;
     int to_copy = (len + *off > dev->size ? dev->size - *off : len);
     int res;
     down_read(&rw_lock);
+    pr_info("membuf: process %d try to read %lu bytes with %lld offset\n", current->pid, len, *off);
+    if (dev->epoch != filp_data->epoch) {
+        pr_info("membuf: operation cancelled, out-of-date file descriptor\n");
+        res = -ENODEV;
+        goto exit;
+    }
     if (*off >= dev->size) {
         *off = 0;
         goto exit;
     }
-    pr_info("membuf: process %d try to read %lu bytes with %lld offset\n", current->pid, len, *off);
     if (copy_to_user(ubuf, dev->buff + *off, to_copy)) {
         pr_info("membuf: copy to user failed, return EFAULT\n");
         res = -EFAULT;
         goto exit;
     }
-    pr_info("Data successfully written into user buffer\n");
+    pr_info("membuf: Data successfully written into user buffer\n");
     *off += to_copy;
     res = to_copy;
     exit:
@@ -210,15 +223,21 @@ static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, lof
 }
 
 static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t len, loff_t *off) {
-    int minor = MINOR(filp->f_inode->i_rdev);
+    int minor = iminor(filp->f_inode);
     struct membuf_device *dev = devs + minor;
+    struct file_private_data *filp_data = filp->private_data;
     int to_copy = (len + *off > dev->size ? dev->size - *off : len);
     int res;
     down_write(&rw_lock);
     pr_info("membuf: process %d try to write %lu bytes with %lld offset\n", current->pid, len, *off);
+    if (dev->epoch != filp_data->epoch) {
+        pr_info("membuf: operation cancelled, out-of-date file descriptor\n");
+        res = -ENODEV;
+        goto exit;
+    }
     if (*off >= dev->size) {
-        pr_info("membuf: offset out of device buffer range, return ENOSPC\n");
-        res = -ENOSPC;
+        pr_info("membuf: offset out of device buffer range, return ENOMEM\n");
+        res = -ENOMEM;
         goto exit;
     }
     if (copy_from_user(dev->buff + *off, ubuf, to_copy)) {
@@ -226,7 +245,7 @@ static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t l
         res = -EFAULT;
         goto exit;
     }
-    pr_info("Data successfully written into knapsack\n");
+    pr_info("membuf: Data successfully written into knapsack\n");
     *off += to_copy;
     res = to_copy;
     exit:
@@ -234,10 +253,37 @@ static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t l
     return res;
 }
 
+// TODO: sync open/release
+static int membuf_open(struct inode* inode, struct file * filp) {
+    int minor = iminor(inode);
+    struct membuf_device *dev = devs + minor;
+
+    struct file_private_data *filp_data = kmalloc(sizeof(struct file_private_data), GFP_KERNEL);
+    pr_info("membuf: file opened with epoch %zu\n", dev->epoch);
+    if (filp_data == 0) {
+        pr_err("membuf: error on buffer allocation\n");
+        return -ENOMEM;
+    }
+    filp_data->epoch = dev->epoch;
+    filp->private_data = filp_data;
+    return 0;
+}
+
+static int membuf_release(struct inode* inode, struct file * filp) {
+    if (filp->private_data) {
+        pr_info("membuf: file closed\n");
+        kfree(filp->private_data);
+        filp->private_data = 0;
+    }
+    return 0;
+}
+
 static struct file_operations membuf_ops = {
     .owner      = THIS_MODULE,
     .read       = membuf_read,
     .write      = membuf_write,
+    .open       = membuf_open,
+    .release    = membuf_release,
 };
 
 static int __init membuf_init(void)
