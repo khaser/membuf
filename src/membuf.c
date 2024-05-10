@@ -28,6 +28,7 @@ struct membuf_device {
     struct device* kdevice;
     unsigned int size;
     size_t epoch; // counts device create+remove operations
+    struct rw_semaphore mutex;
 };
 struct membuf_device devs[MAX_DEV_CNT];
 
@@ -41,7 +42,7 @@ dev_t dev_region = 0;
 static struct cdev membuf_dev;
 static struct class *cls;
 
-DECLARE_RWSEM(rw_lock);
+DECLARE_RWSEM(module_mutex);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
 #define CONST
@@ -52,9 +53,9 @@ DECLARE_RWSEM(rw_lock);
 static ssize_t size_show(struct device *kdev, struct device_attribute *attr, char *buf) {
     int res;
     int minor = MINOR(kdev->devt);
-    down_read(&rw_lock);
+    down_read(&devs[minor].mutex);
     res = sprintf(buf, "%d\n", devs[minor].size);
-    up_read(&rw_lock);
+    up_read(&devs[minor].mutex);
     return res;
 }
 
@@ -64,7 +65,7 @@ static ssize_t size_store(struct device *kdev, struct device_attribute *attr, co
     unsigned int new_val;
     int res;
     struct membuf_device *dev = devs + minor;
-    down_write(&rw_lock);
+    down_write(&dev->mutex);
     if ((res = kstrtouint(buf, 10, &new_val)) < 0) {
         pr_err("membuf: failed to update size\n");
         goto exit;
@@ -85,17 +86,17 @@ static ssize_t size_store(struct device *kdev, struct device_attribute *attr, co
 
     pr_info("membuf: size updated through sys attribute\n");
     exit:
-    up_write(&rw_lock);
+    up_write(&dev->mutex);
     return res;
 }
 
 DEVICE_ATTR_RW(size);
 
-// Should be called when lock taken
 static ssize_t membuf_device_create(dev_t dev_id) {
     int res;
     int minor = MINOR(dev_id);
     struct membuf_device *dev = devs + minor;
+    WARN_ON(!rwsem_is_locked(&module_mutex));
 
     if (IS_ERR(dev->kdevice = device_create(cls, NULL, dev_id, 0, DEVICE_NAME "%d", minor))) {
         pr_err("membuf: error on device_create\n");
@@ -117,6 +118,7 @@ static ssize_t membuf_device_create(dev_t dev_id) {
     }
 
     dev->epoch++;
+    init_rwsem(&dev->mutex);
     pr_info("membuf: device alloc success\n");
     return res;
 
@@ -135,6 +137,7 @@ static void membuf_device_remove(dev_t dev_id) {
     int minor = MINOR(dev_id);
     struct membuf_device *dev = devs + minor;
     // Do nothing if device not allocated
+    WARN_ON(!rwsem_is_locked(&module_mutex));
     if (dev->kdevice != 0) {
         kvfree(dev->buff);
         device_remove_file(dev->kdevice, &dev_attr_size);
@@ -148,16 +151,16 @@ static void membuf_device_remove(dev_t dev_id) {
 
 static ssize_t dev_cnt_show(CONST struct class *kclass, CONST struct class_attribute *attr, char *buf) {
     int res;
-    down_read(&rw_lock);
+    down_read(&module_mutex);
     res = sprintf(buf, "%d\n", (unsigned int)dev_cnt);
-    up_read(&rw_lock);
+    up_read(&module_mutex);
     return res;
 }
 
 static ssize_t dev_cnt_store(CONST struct class *kclass, CONST struct class_attribute *attr, const char *buf, size_t count) {
     unsigned int new_val;
     int res;
-    down_write(&rw_lock);
+    down_write(&module_mutex);
     if ((res = kstrtouint(buf, 10, &new_val)) < 0) {
         pr_err("membuf: failed to update dev_cnt\n");
         goto exit;
@@ -186,7 +189,7 @@ static ssize_t dev_cnt_store(CONST struct class *kclass, CONST struct class_attr
     res = count;
     pr_info("membuf: dev_cnt updated through sys attribute\n");
     exit:
-    up_write(&rw_lock);
+    up_write(&module_mutex);
     return res;
 }
 
@@ -198,7 +201,7 @@ static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, lof
     struct file_private_data *filp_data = filp->private_data;
     int to_copy = (len + *off > dev->size ? dev->size - *off : len);
     int res;
-    down_read(&rw_lock);
+    down_read(&dev->mutex);
     pr_info("membuf: process %d try to read %lu bytes with %lld offset\n", current->pid, len, *off);
     if (dev->epoch != filp_data->epoch) {
         pr_info("membuf: operation cancelled, out-of-date file descriptor\n");
@@ -218,7 +221,7 @@ static ssize_t membuf_read(struct file *filp, char __user *ubuf, size_t len, lof
     *off += to_copy;
     res = to_copy;
     exit:
-    up_read(&rw_lock);
+    up_read(&dev->mutex);
     return res;
 }
 
@@ -228,7 +231,7 @@ static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t l
     struct file_private_data *filp_data = filp->private_data;
     int to_copy = (len + *off > dev->size ? dev->size - *off : len);
     int res;
-    down_write(&rw_lock);
+    down_write(&dev->mutex);
     pr_info("membuf: process %d try to write %lu bytes with %lld offset\n", current->pid, len, *off);
     if (dev->epoch != filp_data->epoch) {
         pr_info("membuf: operation cancelled, out-of-date file descriptor\n");
@@ -249,31 +252,40 @@ static ssize_t membuf_write(struct file *filp, const char __user *ubuf, size_t l
     *off += to_copy;
     res = to_copy;
     exit:
-    up_write(&rw_lock);
+    up_write(&dev->mutex);
     return res;
 }
 
-// TODO: sync open/release
 static int membuf_open(struct inode* inode, struct file * filp) {
     int minor = iminor(inode);
     struct membuf_device *dev = devs + minor;
-
+    int res = 0;
     struct file_private_data *filp_data = kmalloc(sizeof(struct file_private_data), GFP_KERNEL);
+
+    down_read(&dev->mutex);
     pr_info("membuf: file opened with epoch %zu\n", dev->epoch);
     if (filp_data == 0) {
         pr_err("membuf: error on buffer allocation\n");
-        return -ENOMEM;
+        goto exit;
+        res = -ENOMEM;
     }
     filp_data->epoch = dev->epoch;
     filp->private_data = filp_data;
-    return 0;
+    exit:
+    up_read(&dev->mutex);
+    return res;
 }
 
 static int membuf_release(struct inode* inode, struct file * filp) {
+    int minor = iminor(inode);
+    struct membuf_device *dev = devs + minor;
+
     if (filp->private_data) {
+        down_read(&dev->mutex);
         pr_info("membuf: file closed\n");
         kfree(filp->private_data);
         filp->private_data = 0;
+        up_read(&dev->mutex);
     }
     return 0;
 }
@@ -292,6 +304,7 @@ static int __init membuf_init(void)
     dev_t dev_id;
     pr_info("membuf: module load\n");
 
+    down_write(&module_mutex); // used to satisfy assertions
     if ((res = alloc_chrdev_region(&dev_region, 0, MAX_DEV_CNT, DEVICE_NAME)) < 0) {
         pr_err("Error allocating major number\n");
         return res;
@@ -327,6 +340,7 @@ static int __init membuf_init(void)
 
     pr_info("membuf: module init success\n");
 
+    up_write(&module_mutex);
     return 0;
 
     fail4:
@@ -340,10 +354,13 @@ static int __init membuf_init(void)
     cdev_del(&membuf_dev);
     fail1:
     unregister_chrdev_region(dev_region, MAX_DEV_CNT);
+
+    up_write(&module_mutex);
     return res;
 }
 
 static void __exit membuf_cleanup(void) {
+    down_write(&module_mutex);
     for (dev_t dev_id = dev_region; dev_id < dev_region + MAX_DEV_CNT; ++dev_id) {
         membuf_device_remove(dev_id);
     }
@@ -353,6 +370,7 @@ static void __exit membuf_cleanup(void) {
     cdev_del(&membuf_dev);
     unregister_chrdev_region(dev_region, MAX_DEV_CNT);
     pr_info("membuf: module unload\n");
+    up_write(&module_mutex);
 }
 
 module_init(membuf_init);
